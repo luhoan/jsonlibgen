@@ -1,0 +1,16 @@
+# React Dependencies
+node_modules/
+build/
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# The Books (IMPORTANT: Do not upload these!)
+raw_library/
+raw_epubs/
+raw_books/
+
+# Temporary generated files
+prompt_for_claude.txt

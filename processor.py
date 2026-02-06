@@ -1,10 +1,10 @@
 import os
 import json
 import re
-from unicodedata import name
 import warnings
+import time
+import requests # NEW: For fetching genres
 from bs4 import BeautifulSoup
-# --- CRITICAL FIX: Importing ITEM_DOCUMENT preventing the "not defined" error ---
 from ebooklib import epub, ITEM_DOCUMENT 
 
 # ================= CONFIGURATION =================
@@ -55,8 +55,51 @@ def paginate_html(html_content):
         pages.append(current_page_html)
     return pages
 
+# ================= NEW: ONLINE METADATA LOOKUP =================
+
+def fetch_online_metadata(title, author):
+    """
+    Searches Gutendex to find the Genre and ID for a local file.
+    """
+    clean_title = title.split('—')[-1].strip() # Remove Author from title if present
+    query = f"{clean_title} {author}"
+    
+    print(f"      ☁️  Looking up metadata for: '{clean_title}'...")
+    
+    try:
+        # We use Gutendex because it's free and perfect for metadata
+        response = requests.get("https://gutendex.com/books", params={"search": query})
+        data = response.json()
+        
+        if data['count'] > 0:
+            # Check results for author match
+            for book in data['results']:
+                api_authors = str(book.get('authors', [])).lower()
+                if author.lower() in api_authors or author == "Unknown":
+                    # MATCH FOUND
+                    return {
+                        "gutenberg_id": book['id'],
+                        "genres": book.get('subjects', []),
+                        "download_count": book.get('download_count', 0)
+                    }
+                    
+            # If no author match, return first result leniently
+            first = data['results'][0]
+            return {
+                "gutenberg_id": first['id'],
+                "genres": first.get('subjects', []),
+                "download_count": first.get('download_count', 0)
+            }
+            
+    except Exception as e:
+        print(f"      ⚠️ API Lookup failed: {e}")
+    
+    return None
+
+# ================= MAIN DATABASE GENERATOR =================
+
 def generate_database():
-    print("\n🔹 PHASE 3: Generating JSON Database...")
+    print("\n🔹 PHASE 3: Generating JSON Database (with Genre Enrichment)...")
     library_data = []
     
     if not os.path.exists(INPUT_DIR):
@@ -69,7 +112,7 @@ def generate_database():
         file_path = os.path.join(INPUT_DIR, filename)
         ext = os.path.splitext(filename)[1].lower()
         
-        # Derive Metadata from Filename (Trusting the Organizer)
+        # 1. Parse Local Filename
         if "—" in filename:
             parts = filename.split("—", 1)
             author = parts[0].strip()
@@ -79,15 +122,31 @@ def generate_database():
             title = filename.replace(ext, "")
             
         book_id = clean_filename(title).replace(" ", "_").lower()
+        
+        # 2. Fetch Online Metadata (Genres/ID)
+        metadata = fetch_online_metadata(title, author)
+        
+        # Defaults if offline or not found
+        genres = ["Classic Literature"] 
+        gutenberg_id = None
+        
+        if metadata:
+            if metadata['genres']: genres = metadata['genres']
+            gutenberg_id = metadata['gutenberg_id']
+            print(f"      ✅ Found Genre: {genres[0]}...")
+            time.sleep(0.5) # Be polite to API
+        else:
+            print(f"      ❌ Metadata not found online.")
+
+        # 3. Extract Content
         processed_chapters = []
         raw_html_chapters = []
         
-        # --- STRATEGY A: EPUB ---
+        # EPUB Extraction
         if ext == '.epub':
             try:
                 book = epub.read_epub(file_path)
                 for item in book.get_items():
-                    # Check against the imported constant
                     if item.get_type() == ITEM_DOCUMENT: 
                         content = item.get_content().decode('utf-8', errors='ignore')
                         if len(content) > 500: 
@@ -95,7 +154,7 @@ def generate_database():
             except Exception as e:
                 print(f"   ❌ Error reading EPUB {filename}: {e}")
 
-        # --- STRATEGY B: HTML ---
+        # HTML Extraction
         elif ext in ['.html', '.htm']:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -103,7 +162,7 @@ def generate_database():
             except Exception as e:
                 print(f"   ❌ Error reading HTML {filename}: {e}")
 
-        # --- PAGINATION ---
+        # 4. Paginate
         for index, html_chapter in enumerate(raw_html_chapters):
             pages_array = paginate_html(html_chapter)
             if pages_array:
@@ -112,14 +171,17 @@ def generate_database():
                     "pages": pages_array
                 })
 
+        # 5. Build Entry
         if processed_chapters:
             library_data.append({
-                "id": book_id,
+                "id": str(gutenberg_id) if gutenberg_id else book_id, # Prefer real ID
+                "internal_id": book_id,
                 "title": title,
                 "author": author,
+                "genre": genres, # The new field
                 "chapters": processed_chapters
             })
-            print(f"   📖 Processed: {title}")
+            print(f"   📖 Processed Content: {title}")
 
     # Save
     os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
@@ -135,24 +197,24 @@ def generate_claude_prompt(data):
     
     prompt = f"""
 I have a JSON database of books for a React website.
-The content is HTML, and it is ALREADY split into 'pages' for a flipbook.
+The content is HTML, and it is ALREADY split into 'pages'.
+It now includes 'genre' and 'id'.
 
 JSON STRUCTURE:
 ```json
 {sample_json}
 ```
-
 REQUIREMENTS:
 
     Parse this JSON.
-    Create a BookReader component using 'react-pageflip'.
-    Map through chapters, and inside that map through pages.
+    Render a BookReader component using 'react-pageflip'.
+    Use the genre array to maybe display tags or categories.
     Render the HTML string inside the pages using dangerouslySetInnerHTML.
     """
     with open(CLAUDE_PROMPT_FILE, 'w', encoding='utf-8') as f:
-        f.write(prompt)
+    f.write(prompt)
     print(f"🤖 Claude Prompt generated at: {CLAUDE_PROMPT_FILE}")
 
-if __name__ == "__main__":
-    data = generate_database()
-    generate_claude_prompt(data)
+if name == "main":
+data = generate_database()
+generate_claude_prompt(data)
